@@ -21,4 +21,5 @@ FROM scratch as prod
 EXPOSE 8080
 WORKDIR /go/src/app
 COPY --from=builder /go/src/app/main .
+COPY --from=builder /go/src/app/.kube/config ./.kube/
 CMD ["/go/src/app/main"]
