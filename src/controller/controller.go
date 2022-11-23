@@ -2,9 +2,15 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
+	v1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"log"
 	"net/http"
 )
 
@@ -75,40 +81,126 @@ func (c *ctrl) GetNodeList() gin.HandlerFunc {
 	}
 }
 
+func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
+	if list == nil || len(list.Items) == 0 {
+		return v1.Pod{}, errors.New("ListItems is empty")
+	}
+
+	for _, pod := range list.Items {
+		if pod.Name == name {
+			return pod, nil
+		}
+	}
+
+	return v1.Pod{}, errors.New("ListItems is empty")
+}
+
+// TODO labelがnoneの時の挙動の確認
+func podIsRelated(policy netv1.NetworkPolicy, pod v1.Pod) bool {
+	if policy.Namespace != pod.Namespace {
+		return false
+	}
+
+	// matchLabelとmatchExpressionは全てAND条件である。　一つでも条件を満たさなかったらfalseを返す。
+	// matchLabel(等価ベース map)について
+	if policy.Spec.PodSelector.MatchLabels != nil {
+		for k, v := range policy.Spec.PodSelector.MatchLabels {
+			if pod.Labels[k] != v {
+				fmt.Println("くるはずapp3: ", v)
+				return false
+			}
+		}
+	}
+	// matchExpressions(集合ベース 構造体の配列)について
+	if policy.Spec.PodSelector.MatchExpressions != nil {
+		for _, v := range policy.Spec.PodSelector.MatchExpressions {
+			switch v.Operator {
+			case metav1.LabelSelectorOpIn:
+				in := false
+				for _, v2 := range v.Values {
+					if pod.Labels[v.Key] == v2 {
+						in = true
+					}
+				}
+				if !in {
+					return false
+				}
+			case metav1.LabelSelectorOpNotIn:
+				notIn := false
+				for _, v2 := range v.Values {
+					if pod.Labels[v.Key] != "" && pod.Labels[v.Key] != v2 {
+						notIn = true
+					}
+				}
+				if !notIn {
+					return false
+				}
+			case metav1.LabelSelectorOpExists:
+				if pod.Labels[v.Key] == "" {
+					return false
+				}
+			case metav1.LabelSelectorOpDoesNotExist:
+				if pod.Labels[v.Key] != "" {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
+}
+
+func filterPolicyListByPod(policyListItems []netv1.NetworkPolicy, pod v1.Pod) (filteredPolicyListItems []netv1.NetworkPolicy) {
+	for _, policy := range policyListItems {
+		if podIsRelated(policy, pod) {
+			filteredPolicyListItems = append(filteredPolicyListItems, policy)
+		}
+	}
+
+	return filteredPolicyListItems
+}
+
 func (c *ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		podName := ctx.Param("name")
-		_, err := c.kubeClient.CoreV1().Pods("").Get(context.TODO(), podName, metav1.GetOptions{})
+		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+
+		pod, err := findPodByName(podList, podName)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": err.Error(),
 			})
+			return
 		}
 
-		//for _, pod := range pods.Items {
-		//	fmt.Println(pod.Name)
-		//	fmt.Print(">>>> PodIP:")
-		//	fmt.Println(pod.Status.PodIP)
-		//	fmt.Print(">>>> Namespace:")
-		//	fmt.Println(pod.Namespace)
-		//	fmt.Print(">>>> labels:")
-		//	fmt.Println(pod.Labels)
-		//	fmt.Println("")
-		//}
+		if len(podList.Items) == 0 {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": "There is not a pod named" + podName,
+			})
+			return
+		}
 
-		//namespace := "default"
-		//pod := "nginx-app1"
-		//_, err = clientset.CoreV1().Pods(namespace).Get(context.TODO(), pod, metav1.GetOptions{})
-		//if errors.IsNotFound(err) {
-		//	fmt.Printf("Pod %s in namespace %s not found\n", pod, namespace)
-		//} else if statusError, isStatus := err.(*errors.StatusError); isStatus {
-		//	fmt.Printf("Error getting pod %s in namespace %s: %v\n",
-		//		pod, namespace, statusError.ErrStatus.Message)
-		//} else if err != nil {
-		//	panic(err.Error())
-		//} else {
-		//	fmt.Printf("Found pod %s in namespace %s\n", pod, namespace)
-		//}
+		// ネットワークポリシー一覧を取得する
+		policyList, err := c.kubeClient.NetworkingV1().NetworkPolicies("").List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		// target pod のポリシー1を探す ingress egress両方
+		filteredPolicyListItems := filterPolicyListByPod(policyList.Items, pod)
+
+		log.Println("filteredPolicyListItems: ", filteredPolicyListItems[0])
+		log.Println("+++++++++++++++++length:", len(filteredPolicyListItems))
+
+		// ポリシー1で許可してあるpodリストを取得。 ingress egress 両方
+		//各々のpodについてそのpodのポリシー2を探す。一回のループでingress egress 両方
+		// ポリシー2ではtarget podへのegress(ingress)が許可されているか
+		// egressが一つでもあり、target podに関してはない→許可しない
+		// egressが一つもない→　許可する
+		// target pod に関するegresssがある
 
 		ctx.JSON(200, gin.H{
 			"message": "Hello World asu",
@@ -130,6 +222,7 @@ func (c *ctrl) GetNodeDetail() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": err.Error(),
 			})
+			return
 		}
 
 		res := NodeDetailViewModel{
