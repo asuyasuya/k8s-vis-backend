@@ -14,12 +14,12 @@ import (
 	"net/http"
 )
 
-type ctrl struct {
+type Ctrl struct {
 	kubeClient *kubernetes.Clientset
 }
 
-func NewController(kubeClient *kubernetes.Clientset) *ctrl {
-	return &ctrl{
+func NewController(kubeClient *kubernetes.Clientset) *Ctrl {
+	return &Ctrl{
 		kubeClient: kubeClient,
 	}
 }
@@ -39,7 +39,7 @@ type NodeListViewModel struct {
 	NodeList  []NodeViewModel `json:"node_list"`
 }
 
-func (c *ctrl) GetNodeList() gin.HandlerFunc {
+func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		nodes, err := c.kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
@@ -113,15 +113,12 @@ func hasEgress(types []netv1.PolicyType) bool {
 	return false
 }
 
-func podIsRelated(policy netv1.NetworkPolicy, pod v1.Pod) bool {
-	if policy.Namespace != pod.Namespace {
-		return false
-	}
+func podIsRelated(podSelector *metav1.LabelSelector, pod v1.Pod) bool {
 
 	// matchLabelとmatchExpressionは全てAND条件である。　一つでも条件を満たさなかったらfalseを返す。
 	// matchLabel(等価ベース map)について
-	if policy.Spec.PodSelector.MatchLabels != nil {
-		for k, v := range policy.Spec.PodSelector.MatchLabels {
+	if podSelector.MatchLabels != nil {
+		for k, v := range podSelector.MatchLabels {
 			if pod.Labels[k] != v {
 				fmt.Println("くるはずapp3: ", v)
 				return false
@@ -129,8 +126,8 @@ func podIsRelated(policy netv1.NetworkPolicy, pod v1.Pod) bool {
 		}
 	}
 	// matchExpressions(集合ベース 構造体の配列)について
-	if policy.Spec.PodSelector.MatchExpressions != nil {
-		for _, v := range policy.Spec.PodSelector.MatchExpressions {
+	if podSelector.MatchExpressions != nil {
+		for _, v := range podSelector.MatchExpressions {
 			switch v.Operator {
 			case metav1.LabelSelectorOpIn:
 				in := false
@@ -169,7 +166,7 @@ func podIsRelated(policy netv1.NetworkPolicy, pod v1.Pod) bool {
 
 func filterPolicyListByPod(policyListItems []netv1.NetworkPolicy, pod v1.Pod) (filteredPolicyListItems []netv1.NetworkPolicy) {
 	for _, policy := range policyListItems {
-		if podIsRelated(policy, pod) {
+		if policy.Namespace == pod.Namespace && podIsRelated(&policy.Spec.PodSelector, pod) {
 			filteredPolicyListItems = append(filteredPolicyListItems, policy)
 		}
 	}
@@ -177,7 +174,7 @@ func filterPolicyListByPod(policyListItems []netv1.NetworkPolicy, pod v1.Pod) (f
 	return filteredPolicyListItems
 }
 
-func (c *ctrl) GetPodDetail() gin.HandlerFunc {
+func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		podName := ctx.Param("name")
 		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
@@ -224,6 +221,19 @@ func (c *ctrl) GetPodDetail() gin.HandlerFunc {
 							if peer.NamespaceSelector == nil {
 								// ネットワークポリシーが属するnamespaceが対象になる
 
+								// namespaceのチェック
+								if policy.Namespace != pod.Namespace {
+									continue
+								}
+
+								// PodSelectorのチェック
+								if !podIsRelated(peer.PodSelector, pod) {
+									continue
+								}
+
+								// podcidrのチェック
+								//if peer.IPBlock
+
 							} else {
 								// peer.NamespaceSelectorで選択したnamespaceが対象になる。
 							}
@@ -250,7 +260,7 @@ type NodeDetailViewModel struct {
 	PodCidr string `json:"pod_cidr"`
 }
 
-func (c *ctrl) GetNodeDetail() gin.HandlerFunc {
+func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		nodeName := ctx.Param("name")
 		node, err := c.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})

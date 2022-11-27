@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func GetRouter(c *ctrl) *gin.Engine {
+func GetRouter(c *Ctrl) *gin.Engine {
 	router := gin.Default()
 	router.Use(newCorsConfig())
 	api := router.Group("api")
