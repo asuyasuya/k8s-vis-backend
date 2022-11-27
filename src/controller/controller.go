@@ -95,7 +95,24 @@ func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
 	return v1.Pod{}, errors.New("ListItems is empty")
 }
 
-// TODO labelがnoneの時の挙動の確認
+func hasIngress(types []netv1.PolicyType) bool {
+	for _, v := range types {
+		if v == netv1.PolicyTypeIngress {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEgress(types []netv1.PolicyType) bool {
+	for _, v := range types {
+		if v == netv1.PolicyTypeEgress {
+			return true
+		}
+	}
+	return false
+}
+
 func podIsRelated(policy netv1.NetworkPolicy, pod v1.Pod) bool {
 	if policy.Namespace != pod.Namespace {
 		return false
@@ -196,6 +213,25 @@ func (c *ctrl) GetPodDetail() gin.HandlerFunc {
 		log.Println("+++++++++++++++++length:", len(filteredPolicyListItems))
 
 		// ポリシー1で許可してあるpodリストを取得。 ingress egress 両方
+		for _, pod := range podList.Items {
+			for _, policy := range filteredPolicyListItems {
+				if hasIngress(policy.Spec.PolicyTypes) {
+					// podがsrcPodとなりうるかチェックする
+					for _, rule := range policy.Spec.Ingress {
+						// or
+						for _, peer := range rule.From {
+							// and
+							if peer.NamespaceSelector == nil {
+								// ネットワークポリシーが属するnamespaceが対象になる
+
+							} else {
+								// peer.NamespaceSelectorで選択したnamespaceが対象になる。
+							}
+						}
+					}
+				}
+			}
+		}
 		//各々のpodについてそのpodのポリシー2を探す。一回のループでingress egress 両方
 		// ポリシー2ではtarget podへのegress(ingress)が許可されているか
 		// egressが一つでもあり、target podに関してはない→許可しない
