@@ -18,6 +18,7 @@ func GetRouter(c *Ctrl) *gin.Engine {
 	api.GET("nodes", c.GetNodeList())
 	api.GET("nodes/:name", c.GetNodeDetail())
 	api.GET("pods/:name", c.GetPodDetail())
+	api.GET("test", c.GetTest())
 	return router
 }
 

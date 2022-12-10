@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	v1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
+	"net"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -95,6 +96,20 @@ func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
 	return v1.Pod{}, errors.New("ListItems is empty")
 }
 
+func findNamespaceByName(list *v1.NamespaceList, name string) (v1.Namespace, error) {
+	if list == nil || len(list.Items) == 0 {
+		return v1.Namespace{}, errors.New("list items is empty")
+	}
+
+	for _, namespace := range list.Items {
+		if namespace.Name == name {
+			return namespace, nil
+		}
+	}
+
+	return v1.Namespace{}, errors.New("cannot find the namespace")
+}
+
 func hasIngress(types []netv1.PolicyType) bool {
 	for _, v := range types {
 		if v == netv1.PolicyTypeIngress {
@@ -113,13 +128,13 @@ func hasEgress(types []netv1.PolicyType) bool {
 	return false
 }
 
-func podIsRelated(podSelector *metav1.LabelSelector, pod v1.Pod) bool {
+func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.LabelSelector) bool {
 
 	// matchLabelとmatchExpressionは全てAND条件である。　一つでも条件を満たさなかったらfalseを返す。
 	// matchLabel(等価ベース map)について
 	if podSelector.MatchLabels != nil {
 		for k, v := range podSelector.MatchLabels {
-			if pod.Labels[k] != v {
+			if labels[k] != v {
 				fmt.Println("くるはずapp3: ", v)
 				return false
 			}
@@ -132,7 +147,7 @@ func podIsRelated(podSelector *metav1.LabelSelector, pod v1.Pod) bool {
 			case metav1.LabelSelectorOpIn:
 				in := false
 				for _, v2 := range v.Values {
-					if pod.Labels[v.Key] == v2 {
+					if labels[v.Key] == v2 {
 						in = true
 					}
 				}
@@ -142,7 +157,7 @@ func podIsRelated(podSelector *metav1.LabelSelector, pod v1.Pod) bool {
 			case metav1.LabelSelectorOpNotIn:
 				notIn := false
 				for _, v2 := range v.Values {
-					if pod.Labels[v.Key] != "" && pod.Labels[v.Key] != v2 {
+					if labels[v.Key] != "" && labels[v.Key] != v2 {
 						notIn = true
 					}
 				}
@@ -150,23 +165,25 @@ func podIsRelated(podSelector *metav1.LabelSelector, pod v1.Pod) bool {
 					return false
 				}
 			case metav1.LabelSelectorOpExists:
-				if pod.Labels[v.Key] == "" {
+				if labels[v.Key] == "" {
 					return false
 				}
 			case metav1.LabelSelectorOpDoesNotExist:
-				if pod.Labels[v.Key] != "" {
+				if labels[v.Key] != "" {
 					return false
 				}
 			}
 		}
 	}
 
+	// todo podセレクターがから{}の時にちゃんとtrueになることを確認
+
 	return true
 }
 
 func filterPolicyListByPod(policyListItems []netv1.NetworkPolicy, pod v1.Pod) (filteredPolicyListItems []netv1.NetworkPolicy) {
 	for _, policy := range policyListItems {
-		if policy.Namespace == pod.Namespace && podIsRelated(&policy.Spec.PodSelector, pod) {
+		if policy.Namespace == pod.Namespace && isIncludedInLabelSelector(pod.Labels, &policy.Spec.PodSelector) {
 			filteredPolicyListItems = append(filteredPolicyListItems, policy)
 		}
 	}
@@ -174,12 +191,44 @@ func filterPolicyListByPod(policyListItems []netv1.NetworkPolicy, pod v1.Pod) (f
 	return filteredPolicyListItems
 }
 
+func isIncludedInIpBlock(ipBlock *netv1.IPBlock, ip string) (bool, error) {
+	if ipBlock == nil {
+		// ipBlockに関する条件がないのでtrueで返す
+		return true, nil
+	}
+
+	_, cidrNet, err := net.ParseCIDR(ipBlock.CIDR)
+	if err != nil {
+		log.Fatal(err)
+		return false, err
+	}
+
+	targetIP := net.ParseIP(ip)
+	if !cidrNet.Contains(targetIP) {
+		return false, nil
+	}
+
+	if len(ipBlock.Except) > 0 {
+		for _, v := range ipBlock.Except {
+			_, exceptCidrNet, err := net.ParseCIDR(v)
+			if err != nil {
+				return false, err
+			}
+			if exceptCidrNet.Contains(targetIP) {
+				return false, nil
+			}
+		}
+	}
+
+	return true, nil
+}
+
 func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		podName := ctx.Param("name")
 		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 
-		pod, err := findPodByName(podList, podName)
+		targetPod, err := findPodByName(podList, podName)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": err.Error(),
@@ -204,14 +253,25 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		}
 
 		// target pod のポリシー1を探す ingress egress両方
-		filteredPolicyListItems := filterPolicyListByPod(policyList.Items, pod)
+		filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
 
 		log.Println("filteredPolicyListItems: ", filteredPolicyListItems[0])
 		log.Println("+++++++++++++++++length:", len(filteredPolicyListItems))
 
+		// namespaceSelectorで選択する必要があるので、namespace一覧を取得する
+		namespaceList, err := c.kubeClient.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+
+		var ingressSrcPodList []v1.Pod
+		//var egressDestPodList []v1.Pod
+
 		// ポリシー1で許可してあるpodリストを取得。 ingress egress 両方
 		for _, pod := range podList.Items {
+			if targetPod.Name == pod.Name {
+				// 自身は除外
+				continue
+			}
 			for _, policy := range filteredPolicyListItems {
+				// 指定がない時はingressになるか　→ なる
 				if hasIngress(policy.Spec.PolicyTypes) {
 					// podがsrcPodとなりうるかチェックする
 					for _, rule := range policy.Spec.Ingress {
@@ -219,6 +279,8 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 						for _, peer := range rule.From {
 							// and
 							if peer.NamespaceSelector == nil {
+								// namespaceSelectorが与えられない時と 与えられるが空だった時の違い
+								// → 与えれらない時はnullになって、与えられるが空になる時は構造体が空になる
 								// ネットワークポリシーが属するnamespaceが対象になる
 
 								// namespaceのチェック
@@ -226,17 +288,41 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 									continue
 								}
 
-								// PodSelectorのチェック
-								if !podIsRelated(peer.PodSelector, pod) {
+							} else {
+								// podの属しているnamespaceのlabelsがpeer.NamespaceSelectorに含まれている場合行ける
+
+								// namespaceのチェック
+								namespace, err := findNamespaceByName(namespaceList, pod.Namespace)
+								if err != nil {
+									ctx.JSON(http.StatusInternalServerError, gin.H{
+										"error": "invalid ip block",
+									})
+									return
+								}
+								if !isIncludedInLabelSelector(namespace.Labels, peer.NamespaceSelector) {
 									continue
 								}
 
-								// podcidrのチェック
-								//if peer.IPBlock
-
-							} else {
-								// peer.NamespaceSelectorで選択したnamespaceが対象になる。
 							}
+							// PodSelectorのチェック
+							if !isIncludedInLabelSelector(pod.Labels, peer.PodSelector) {
+								continue
+							}
+
+							// podcidrのチェック
+							isIncluded, err := isIncludedInIpBlock(peer.IPBlock, pod.Status.PodIP)
+							if err != nil {
+								ctx.JSON(http.StatusInternalServerError, gin.H{
+									"error": "invalid ip block",
+								})
+								return
+							}
+
+							if !isIncluded {
+								continue
+							}
+
+							ingressSrcPodList = append(ingressSrcPodList, pod)
 						}
 					}
 				}
@@ -278,5 +364,42 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 		}
 
 		ctx.JSON(200, res)
+	}
+}
+
+func (c *Ctrl) GetTest() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		policy, err := c.kubeClient.NetworkingV1().NetworkPolicies("default").List(context.TODO(), metav1.ListOptions{
+			FieldSelector: "metadata.name=pod-selector-test"})
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+		log.Println("policy types = ", policy.Items[0].Spec.PolicyTypes)
+		log.Println("has ingress = ", hasIngress(policy.Items[0].Spec.PolicyTypes))
+		log.Println("has egress = ", hasEgress(policy.Items[0].Spec.PolicyTypes))
+		for _, v := range policy.Items {
+			log.Println("++++++++++")
+			log.Println("ingress rule length = ", len(v.Spec.Ingress))
+			for _, rule := range v.Spec.Ingress {
+				log.Println("======")
+				log.Println("ingress peer length = ", len(rule.From))
+				for _, peer := range rule.From {
+					log.Println("namespaceSelector = ", peer.NamespaceSelector)
+					log.Println("namespaceSelector is null = ", peer.NamespaceSelector == nil)
+					log.Println("podSelector = ", peer.PodSelector)
+					log.Println("ipBlock = ", peer.IPBlock)
+					log.Println("---")
+				}
+				log.Println("======")
+			}
+			log.Println("++++++++++")
+
+		}
+		ctx.JSON(200, gin.H{
+			"message": "OK",
+		})
 	}
 }
