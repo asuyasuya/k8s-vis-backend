@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/aws/smithy-go/ptr"
 	"github.com/gin-gonic/gin"
 	v1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
@@ -122,20 +122,6 @@ func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
 	return v1.Pod{}, errors.New("ListItems is empty")
 }
 
-func findNamespaceByName(list *v1.NamespaceList, name string) (v1.Namespace, error) {
-	if list == nil || len(list.Items) == 0 {
-		return v1.Namespace{}, errors.New("list items is empty")
-	}
-
-	for _, namespace := range list.Items {
-		if namespace.Name == name {
-			return namespace, nil
-		}
-	}
-
-	return v1.Namespace{}, errors.New("cannot find the namespace")
-}
-
 func hasIngress(types []netv1.PolicyType) bool {
 	for _, v := range types {
 		if v == netv1.PolicyTypeIngress {
@@ -161,7 +147,6 @@ func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.Lab
 	if podSelector.MatchLabels != nil {
 		for k, v := range podSelector.MatchLabels {
 			if labels[k] != v {
-				fmt.Println("くるはずapp3: ", v)
 				return false
 			}
 		}
@@ -429,7 +414,6 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		// target pod のポリシー1を探す ingress egress両方
 		filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
 
-		log.Println("filteredPolicyListItems: ", filteredPolicyListItems[0])
 		log.Println("+++++++++++++++++length:", len(filteredPolicyListItems))
 
 		// namespaceSelectorで選択する必要があるので、namespace一覧を取得する
@@ -446,9 +430,13 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		// todo ingress{} と　未選択によりすべてDenyを判別できるようにする。
 		targetIngressMap, targetEgressMap, podMap := getTargetPodPolicyMap(ctx, targetPod, podList, namespaceMap, policyList)
 
+		log.Println("len of targetIngress:", len(targetIngressMap))
+		log.Println("len of targetIngress:", targetEgressMap)
+		log.Println("len of targetIngress:", len(podMap))
+
 		var res PodDetailViewModel
-		var ingressPodPolicyMap map[string]PodPolicy
-		var egressPodPolicyMap map[string]PodPolicy
+		ingressPodPolicyMap := make(map[string]PodPolicy)
+		egressPodPolicyMap := make(map[string]PodPolicy)
 
 		for _, v := range podMap {
 			destIngressMap, srcEgressMap, _ := getTargetPodPolicyMap(ctx, v, podList, namespaceMap, policyList)
@@ -483,7 +471,7 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 						resPorts = append(resPorts, PortInfo{
 							Protocol: castProtocol(port.Protocol),
 							Port:     int(port.Port.IntVal),
-							EndPort:  int(*port.EndPort),
+							EndPort:  int(ptr.ToInt32(port.EndPort)),
 						})
 					}
 					egressPodPolicyMap[v.Name] = PodPolicy{
