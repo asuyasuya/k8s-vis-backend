@@ -7,12 +7,11 @@ import (
 	"github.com/gin-gonic/gin"
 	v1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"net"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"log"
+	"net"
 	"net/http"
 )
 
@@ -101,12 +100,13 @@ type PodPolicy struct {
 }
 
 type PodDetailViewModel struct {
-	Name      string      `json:"name"`
-	Ip        string      `json:"ip"`
-	Namespace string      `json:"namespace"`
-	Labels    []Label     `json:"labels"`
-	Ingress   []PodPolicy `json:"ingress"`
-	Egress    []PodPolicy `json:"egress"`
+	Name        string      `json:"name"`
+	Ip          string      `json:"ip"`
+	Namespace   string      `json:"namespace"`
+	Labels      []Label     `json:"labels"`
+	PolicyNames []string    `json:"policy_names"`
+	Ingress     []PodPolicy `json:"ingress"`
+	Egress      []PodPolicy `json:"egress"`
 }
 
 func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
@@ -141,6 +141,9 @@ func hasEgress(types []netv1.PolicyType) bool {
 }
 
 func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.LabelSelector) bool {
+	if podSelector == nil {
+		return true
+	}
 
 	// matchLabelとmatchExpressionは全てAND条件である。　一つでも条件を満たさなかったらfalseを返す。
 	// matchLabel(等価ベース map)について
@@ -377,6 +380,15 @@ func castProtocol(protocol *v1.Protocol) string {
 	}
 }
 
+func initPodNamePolicyInfoMap(m map[string]*policyInfo, pod v1.Pod) {
+	if _, ok := m[pod.Name]; !ok {
+		m[pod.Name] = &policyInfo{
+			pod:   pod,
+			ports: make([]netv1.NetworkPolicyPort, 0, 5),
+		}
+	}
+}
+
 type policyInfo struct {
 	pod   v1.Pod
 	ports []netv1.NetworkPolicyPort
@@ -411,11 +423,6 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 			return
 		}
 
-		// target pod のポリシー1を探す ingress egress両方
-		filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
-
-		log.Println("+++++++++++++++++length:", len(filteredPolicyListItems))
-
 		// namespaceSelectorで選択する必要があるので、namespace一覧を取得する
 		namespaceList, err := c.kubeClient.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
@@ -428,65 +435,62 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 
 		// todo ちゃんとこの段階でingress空の時に全てのPodが入っているようにする
 		// todo ingress{} と　未選択によりすべてDenyを判別できるようにする。
-		targetIngressMap, targetEgressMap, podMap := getTargetPodPolicyMap(ctx, targetPod, podList, namespaceMap, policyList)
-
-		log.Println("len of targetIngress:", len(targetIngressMap))
-		log.Println("len of targetIngress:", targetEgressMap)
-		log.Println("len of targetIngress:", len(podMap))
+		targetIngressMap, targetEgressMap, podMap, policyNames := getTargetPodPolicyMap(ctx, targetPod, podList, namespaceMap, policyList)
 
 		var res PodDetailViewModel
 		ingressPodPolicyMap := make(map[string]PodPolicy)
 		egressPodPolicyMap := make(map[string]PodPolicy)
 
-		for _, v := range podMap {
-			destIngressMap, srcEgressMap, _ := getTargetPodPolicyMap(ctx, v, podList, namespaceMap, policyList)
-			// ingressMap[v.Name]とsrcEgressMap[targetPod]の交わりが行けるポート番号
-			targetIngressPolicy, ok1 := targetIngressMap[v.Name]
-			srcEgressPolicy, ok2 := srcEgressMap[targetPod.Name]
-			if ok1 && ok2 {
-				if accessPorts, hasPort := getAccessPorts(targetIngressPolicy.ports, srcEgressPolicy.ports); hasPort {
-					var resPorts []PortInfo
-					for _, port := range accessPorts {
-						resPorts = append(resPorts, PortInfo{
-							Protocol: castProtocol(port.Protocol),
-							Port:     int(port.Port.IntVal),
-							EndPort:  int(*port.EndPort),
-						})
-					}
-					ingressPodPolicyMap[v.Name] = PodPolicy{
-						Name:      v.Name,
-						CanAccess: true,
-						Ports:     resPorts,
-					}
-				}
-			}
-
-			// egressMap[v.Name]とdestIngressMap[targetPod]の交わりがおっけ
-			targetEgressPolicy, ok1 := targetEgressMap[v.Name]
-			destIngressPolicy, ok2 := destIngressMap[targetPod.Name]
-			if ok1 && ok2 {
-				if accessPorts, hasPort := getAccessPorts(targetEgressPolicy.ports, destIngressPolicy.ports); hasPort {
-					var resPorts []PortInfo
-					for _, port := range accessPorts {
-						resPorts = append(resPorts, PortInfo{
-							Protocol: castProtocol(port.Protocol),
-							Port:     int(port.Port.IntVal),
-							EndPort:  int(ptr.ToInt32(port.EndPort)),
-						})
-					}
-					egressPodPolicyMap[v.Name] = PodPolicy{
-						Name:      v.Name,
-						CanAccess: true,
-						Ports:     resPorts,
-					}
-				}
-			}
-		}
-
+		// resの作成
 		var ingress []PodPolicy
 		var egress []PodPolicy
-
 		for _, pod := range podList.Items {
+			if v, ok := podMap[pod.Name]; ok {
+				destIngressMap, srcEgressMap, _, _ := getTargetPodPolicyMap(ctx, v, podList, namespaceMap, policyList)
+				// ingressMap[v.Name]とsrcEgressMap[targetPod]の交わりが行けるポート番号
+				targetIngressPolicy, ok1 := targetIngressMap[v.Name]
+				srcEgressPolicy, ok2 := srcEgressMap[targetPod.Name]
+
+				if ok1 && ok2 {
+					if accessPorts, hasPort := getAccessPorts(targetIngressPolicy.ports, srcEgressPolicy.ports); hasPort {
+						var resPorts []PortInfo
+						for _, port := range accessPorts {
+							resPorts = append(resPorts, PortInfo{
+								Protocol: castProtocol(port.Protocol),
+								Port:     int(port.Port.IntVal),
+								EndPort:  int(ptr.ToInt32(port.EndPort)),
+							})
+						}
+						ingressPodPolicyMap[v.Name] = PodPolicy{
+							Name:      v.Name,
+							CanAccess: true,
+							Ports:     resPorts,
+						}
+					}
+				}
+
+				// egressMap[v.Name]とdestIngressMap[targetPod]の交わりがおっけ
+				targetEgressPolicy, ok1 := targetEgressMap[v.Name]
+				destIngressPolicy, ok2 := destIngressMap[targetPod.Name]
+				if ok1 && ok2 {
+					if accessPorts, hasPort := getAccessPorts(targetEgressPolicy.ports, destIngressPolicy.ports); hasPort {
+						var resPorts []PortInfo
+						for _, port := range accessPorts {
+							resPorts = append(resPorts, PortInfo{
+								Protocol: castProtocol(port.Protocol),
+								Port:     int(port.Port.IntVal),
+								EndPort:  int(ptr.ToInt32(port.EndPort)),
+							})
+						}
+						egressPodPolicyMap[v.Name] = PodPolicy{
+							Name:      v.Name,
+							CanAccess: true,
+							Ports:     resPorts,
+						}
+					}
+				}
+			}
+
 			if policy, ok := ingressPodPolicyMap[pod.Name]; ok {
 				ingress = append(ingress, policy)
 			} else {
@@ -518,6 +522,7 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		res.Namespace = targetPod.Namespace
 		res.Ip = targetPod.Status.PodIP
 		res.Labels = resLabels
+		res.PolicyNames = policyNames
 		res.Ingress = ingress
 		res.Egress = egress
 
@@ -525,13 +530,27 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	}
 }
 
-func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodList, namespaceMap map[string]v1.Namespace, policyList *netv1.NetworkPolicyList) (map[string]*policyInfo, map[string]*policyInfo, map[string]v1.Pod) {
+func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodList, namespaceMap map[string]v1.Namespace, policyList *netv1.NetworkPolicyList) (map[string]*policyInfo, map[string]*policyInfo, map[string]v1.Pod, []string) {
 	// target pod のポリシー1を探す ingress egress両方
 	filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
+	targetPodPolicyNames := make([]string, len(filteredPolicyListItems))
+	for i := range filteredPolicyListItems {
+		targetPodPolicyNames[i] = filteredPolicyListItems[i].Name
+	}
 
-	ingressMap := make(map[string]*policyInfo, len(policyList.Items))
-	egressMap := make(map[string]*policyInfo, len(policyList.Items))
-	podMap := make(map[string]v1.Pod, len(policyList.Items))
+	ingressMap := make(map[string]*policyInfo, len(podList.Items))
+	egressMap := make(map[string]*policyInfo, len(podList.Items))
+	podMap := make(map[string]v1.Pod, len(podList.Items))
+
+	if len(filteredPolicyListItems) == 0 {
+		for _, v := range podList.Items {
+			ingressMap[v.Name] = &policyInfo{pod: v}
+			egressMap[v.Name] = &policyInfo{pod: v}
+			podMap[v.Name] = v
+		}
+		return ingressMap, egressMap, podMap, targetPodPolicyNames
+	}
+
 	// ポリシー1で許可してあるpodリストを取得。 ingress egress 両方
 	for _, pod := range podList.Items {
 		if targetPod.Name == pod.Name {
@@ -544,6 +563,13 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 			if hasIngress(policy.Spec.PolicyTypes) {
 				// podがsrcPodとなりうるかチェックする
 				for _, rule := range policy.Spec.Ingress {
+					if len(rule.From) == 0 {
+						// ingress{} パターン 全namespaceのいかなる全podを受け入れる
+						initPodNamePolicyInfoMap(ingressMap, pod)
+						ingressMap[pod.Name].ports = append(ingressMap[pod.Name].ports, rule.Ports...)
+						podMap[pod.Name] = pod
+						continue
+					}
 					// or
 					for _, peer := range rule.From {
 						// and
@@ -576,19 +602,14 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 							ctx.JSON(http.StatusInternalServerError, gin.H{
 								"error": "invalid ip block",
 							})
-							return nil, nil, nil
+							return nil, nil, nil, nil
 						}
 
 						if !isIncluded {
 							continue
 						}
 
-						if _, ok := ingressMap[pod.Name]; !ok {
-							ingressMap[pod.Name] = &policyInfo{
-								pod:   pod,
-								ports: make([]netv1.NetworkPolicyPort, 0, 5),
-							}
-						}
+						initPodNamePolicyInfoMap(ingressMap, pod)
 						ingressMap[pod.Name].ports = append(ingressMap[pod.Name].ports, rule.Ports...)
 						podMap[pod.Name] = pod
 					}
@@ -596,6 +617,13 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 			} else if hasEgress(policy.Spec.PolicyTypes) {
 				// podがsrcPodとなりうるかチェックする
 				for _, rule := range policy.Spec.Egress {
+					if len(rule.To) == 0 {
+						// ingress{} パターン 全namespaceのいかなる全podを受け入れる
+						initPodNamePolicyInfoMap(egressMap, pod)
+						egressMap[pod.Name].ports = append(egressMap[pod.Name].ports, rule.Ports...)
+						podMap[pod.Name] = pod
+						continue
+					}
 					// or
 					for _, peer := range rule.To {
 						// and
@@ -629,19 +657,14 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 							ctx.JSON(http.StatusInternalServerError, gin.H{
 								"error": "invalid ip block",
 							})
-							return nil, nil, nil
+							return nil, nil, nil, nil
 						}
 
 						if !isIncluded {
 							continue
 						}
 
-						if _, ok := egressMap[pod.Name]; !ok {
-							egressMap[pod.Name] = &policyInfo{
-								pod:   pod,
-								ports: make([]netv1.NetworkPolicyPort, 0, 5),
-							}
-						}
+						initPodNamePolicyInfoMap(egressMap, pod)
 						egressMap[pod.Name].ports = append(egressMap[pod.Name].ports, rule.Ports...)
 						podMap[pod.Name] = pod
 					}
@@ -649,7 +672,7 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 			}
 		}
 	}
-	return ingressMap, egressMap, podMap
+	return ingressMap, egressMap, podMap, targetPodPolicyNames
 }
 
 type NodeDetailViewModel struct {
@@ -682,7 +705,7 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 func (c *Ctrl) GetTest() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		policy, err := c.kubeClient.NetworkingV1().NetworkPolicies("default").List(context.TODO(), metav1.ListOptions{
-			FieldSelector: "metadata.name=pod-selector-test"})
+			FieldSelector: "metadata.name=test-policy-empty2"})
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": err.Error(),
@@ -695,6 +718,8 @@ func (c *Ctrl) GetTest() gin.HandlerFunc {
 		for _, v := range policy.Items {
 			log.Println("++++++++++")
 			log.Println("ingress rule length = ", len(v.Spec.Ingress))
+			log.Println(v.Spec) // {{map[app:app4] []} [{[] []}] [] [Ingress]} {{map[app:app5] []} [{[] [{&LabelSelector{MatchLabels:map[string]string{},MatchExpressions:[]LabelSelectorRequirement{},} nil nil}]}] [] [Ingress]}
+
 			for _, rule := range v.Spec.Ingress {
 				log.Println("======")
 				log.Println("ingress peer length = ", len(rule.From))
