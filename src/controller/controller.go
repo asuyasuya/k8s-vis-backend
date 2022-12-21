@@ -197,8 +197,6 @@ func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.Lab
 		}
 	}
 
-	// todo podセレクターがから{}の時にちゃんとtrueになることを確認
-
 	return true
 }
 
