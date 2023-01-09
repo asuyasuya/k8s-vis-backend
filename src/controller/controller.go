@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/aws/smithy-go/ptr"
 	"github.com/gin-gonic/gin"
 	v1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 )
 
 type Ctrl struct {
@@ -42,6 +44,7 @@ type NodeListViewModel struct {
 
 func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		now := time.Now()
 		nodes, err := c.kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
@@ -79,6 +82,7 @@ func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, res)
+		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
 	}
 }
 
@@ -147,6 +151,7 @@ func hasEgress(types []netv1.PolicyType) bool {
 	return false
 }
 
+// 別の処理にする
 func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.LabelSelector) bool {
 	if podSelector == nil {
 		return true
@@ -412,6 +417,7 @@ type policyInfo struct {
 
 func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		now := time.Now()
 		podName := ctx.Param("name")
 		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 
@@ -452,8 +458,6 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		targetIngressMap, targetEgressMap, podMap, policyNames := getTargetPodPolicyMap(ctx, targetPod, podList, namespaceMap, policyList)
 
 		var res PodDetailViewModel
-		ingressPodPolicyMap := make(map[string]PodPolicy)
-		egressPodPolicyMap := make(map[string]PodPolicy)
 
 		// resの作成
 		accessPods := make([]AccessPod, len(podList.Items))
@@ -463,13 +467,11 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 			accessPods[i].Ip = pod.Status.PodIP
 			accessPods[i].Labels = labelViewModel(pod)
 			if _, ok := podMap[pod.Name]; ok {
-				destIngressMap, srcEgressMap, _, _ := getTargetPodPolicyMap(ctx, pod, podList, namespaceMap, policyList)
-				// ingressMap[v.Name]とsrcEgressMap[targetPod]の交わりが行けるポート番号
-				targetIngressPolicy, ok1 := targetIngressMap[pod.Name]
-				srcEgressPolicy, ok2 := srcEgressMap[targetPod.Name]
+				accessPodPolicy := getAccessPodPolicy(ctx, targetPod, pod, namespaceMap[targetPod.Namespace], policyList) // ingressMap[v.Name]とsrcEgressMap[targetPod]の交わりが行けるポート番号
 
-				if ok1 && ok2 {
-					if accessPorts, hasPort := getAccessPorts(targetIngressPolicy.ports, srcEgressPolicy.ports); hasPort {
+				targetIngressPolicy, ok1 := targetIngressMap[pod.Name]
+				if ok && accessPodPolicy.egress != nil {
+					if accessPorts, hasPort := getAccessPorts(targetIngressPolicy.ports, accessPodPolicy.egress.ports); hasPort {
 						var resPorts []PortInfo
 						for _, port := range accessPorts {
 							resPorts = append(resPorts, PortInfo{
@@ -478,18 +480,25 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 								EndPort:  int(ptr.ToInt32(port.EndPort)),
 							})
 						}
-						ingressPodPolicyMap[pod.Name] = PodPolicy{
+						accessPods[i].Ingress = PodPolicy{
 							CanAccess: true,
 							Ports:     resPorts,
 						}
+					} else {
+						accessPods[i].Ingress = PodPolicy{
+							CanAccess: false,
+						}
+					}
+				} else {
+					accessPods[i].Ingress = PodPolicy{
+						CanAccess: false,
 					}
 				}
 
 				// egressMap[v.Name]とdestIngressMap[targetPod]の交わりがおっけ
 				targetEgressPolicy, ok1 := targetEgressMap[pod.Name]
-				destIngressPolicy, ok2 := destIngressMap[targetPod.Name]
-				if ok1 && ok2 {
-					if accessPorts, hasPort := getAccessPorts(targetEgressPolicy.ports, destIngressPolicy.ports); hasPort {
+				if ok1 && accessPodPolicy.ingress != nil {
+					if accessPorts, hasPort := getAccessPorts(targetEgressPolicy.ports, accessPodPolicy.ingress.ports); hasPort {
 						var resPorts []PortInfo
 						for _, port := range accessPorts {
 							resPorts = append(resPorts, PortInfo{
@@ -499,30 +508,28 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 							})
 						}
 
-						egressPodPolicyMap[pod.Name] = PodPolicy{
+						accessPods[i].Egress = PodPolicy{
 							CanAccess: true,
 							Ports:     resPorts,
 						}
+					} else {
+						accessPods[i].Egress = PodPolicy{
+							CanAccess: false,
+						}
+					}
+				} else {
+					accessPods[i].Egress = PodPolicy{
+						CanAccess: false,
 					}
 				}
-			}
-
-			if policy, ok := ingressPodPolicyMap[pod.Name]; ok {
-				accessPods[i].Ingress = policy
 			} else {
 				accessPods[i].Ingress = PodPolicy{
 					CanAccess: false,
 				}
-			}
-
-			if policy, ok := egressPodPolicyMap[pod.Name]; ok {
-				accessPods[i].Egress = policy
-			} else {
 				accessPods[i].Egress = PodPolicy{
 					CanAccess: false,
 				}
 			}
-
 		}
 
 		res.Name = targetPod.Name
@@ -533,6 +540,7 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		res.AccessPods = accessPods
 
 		ctx.JSON(http.StatusOK, res)
+		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
 	}
 }
 
@@ -681,6 +689,109 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 	return ingressMap, egressMap, podMap, targetPodPolicyNames
 }
 
+type accessPodPolicy struct {
+	ingress *policyInfo
+	egress  *policyInfo
+}
+
+func getAccessPodPolicy(ctx *gin.Context, targetPod v1.Pod, accessPod v1.Pod, namespace v1.Namespace, policyList *netv1.NetworkPolicyList) *accessPodPolicy {
+	filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
+
+	res := &accessPodPolicy{}
+
+	if len(filteredPolicyListItems) == 0 {
+		res.ingress = &policyInfo{pod: targetPod}
+		res.egress = &policyInfo{pod: targetPod}
+		return res
+	}
+
+	if accessPod.Name == targetPod.Name {
+		// 自身は除外
+		return res
+	}
+
+	for _, policy := range filteredPolicyListItems {
+		if hasIngress(policy.Spec.PolicyTypes) {
+			for _, rule := range policy.Spec.Ingress {
+				if len(rule.From) == 0 {
+
+				}
+				for _, peer := range rule.From {
+					if peer.NamespaceSelector == nil {
+						if policy.Namespace != targetPod.Namespace {
+							continue
+						}
+					} else {
+						if !isIncludedInLabelSelector(namespace.Labels, peer.NamespaceSelector) {
+							continue
+						}
+					}
+					if !isIncludedInLabelSelector(targetPod.Labels, peer.PodSelector) {
+						continue
+					}
+					isIncluded, err := isIncludedInIpBlock(peer.IPBlock, targetPod.Status.PodIP)
+					if err != nil {
+						ctx.JSON(http.StatusInternalServerError, gin.H{
+							"error": "invalid ip block",
+						})
+						return res
+					}
+					if !isIncluded {
+						continue
+					}
+
+					if res.ingress == nil {
+						res.ingress = &policyInfo{
+							pod:   targetPod,
+							ports: []netv1.NetworkPolicyPort{},
+						}
+					}
+					res.ingress.ports = append(res.ingress.ports, rule.Ports...)
+				}
+			}
+		} else if hasEgress(policy.Spec.PolicyTypes) {
+			for _, rule := range policy.Spec.Egress {
+				if len(rule.To) == 0 {
+
+				}
+				for _, peer := range rule.To {
+					if peer.NamespaceSelector == nil {
+						if policy.Namespace != targetPod.Namespace {
+							continue
+						}
+					} else {
+						if !isIncludedInLabelSelector(namespace.Labels, peer.NamespaceSelector) {
+							continue
+						}
+					}
+					if !isIncludedInLabelSelector(targetPod.Labels, peer.PodSelector) {
+						continue
+					}
+					isIncluded, err := isIncludedInIpBlock(peer.IPBlock, targetPod.Status.PodIP)
+					if err != nil {
+						ctx.JSON(http.StatusInternalServerError, gin.H{
+							"error": "invalid ip block",
+						})
+						return res
+					}
+					if !isIncluded {
+						continue
+					}
+
+					if res.egress == nil {
+						res.egress = &policyInfo{
+							pod:   targetPod,
+							ports: []netv1.NetworkPolicyPort{},
+						}
+					}
+					res.egress.ports = append(res.egress.ports, rule.Ports...)
+				}
+			}
+		}
+	}
+	return res
+}
+
 type NodeDetailViewModel struct {
 	Name    string `json:"name"`
 	Ip      string `json:"ip"`
@@ -689,6 +800,7 @@ type NodeDetailViewModel struct {
 
 func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		now := time.Now()
 		nodeName := ctx.Param("name")
 		node, err := c.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 		if err != nil {
@@ -705,6 +817,7 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 		}
 
 		ctx.JSON(200, res)
+		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
 	}
 }
 
