@@ -628,7 +628,8 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 						podMap[pod.Name] = pod
 					}
 				}
-			} else if hasEgress(policy.Spec.PolicyTypes) {
+			}
+			if hasEgress(policy.Spec.PolicyTypes) {
 				// podがsrcPodとなりうるかチェックする
 				for _, rule := range policy.Spec.Egress {
 					if len(rule.To) == 0 {
