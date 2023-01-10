@@ -695,7 +695,7 @@ type accessPodPolicy struct {
 }
 
 func getAccessPodPolicy(ctx *gin.Context, targetPod v1.Pod, accessPod v1.Pod, namespace v1.Namespace, policyList *netv1.NetworkPolicyList) *accessPodPolicy {
-	filteredPolicyListItems := filterPolicyListByPod(policyList.Items, targetPod)
+	filteredPolicyListItems := filterPolicyListByPod(policyList.Items, accessPod)
 
 	res := &accessPodPolicy{}
 
@@ -714,7 +714,7 @@ func getAccessPodPolicy(ctx *gin.Context, targetPod v1.Pod, accessPod v1.Pod, na
 		if hasIngress(policy.Spec.PolicyTypes) {
 			for _, rule := range policy.Spec.Ingress {
 				if len(rule.From) == 0 {
-
+					// todo
 				}
 				for _, peer := range rule.From {
 					if peer.NamespaceSelector == nil {
@@ -749,10 +749,11 @@ func getAccessPodPolicy(ctx *gin.Context, targetPod v1.Pod, accessPod v1.Pod, na
 					res.ingress.ports = append(res.ingress.ports, rule.Ports...)
 				}
 			}
-		} else if hasEgress(policy.Spec.PolicyTypes) {
+		}
+		if hasEgress(policy.Spec.PolicyTypes) {
 			for _, rule := range policy.Spec.Egress {
 				if len(rule.To) == 0 {
-
+					// todo
 				}
 				for _, peer := range rule.To {
 					if peer.NamespaceSelector == nil {
