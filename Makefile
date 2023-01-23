@@ -1,6 +1,5 @@
 .PHONY: prod
 prod:
-	docker rm api-prod-container
 	docker rmi api-prod
 	docker build -t api-prod --target prod .
 
