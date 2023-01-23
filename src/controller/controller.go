@@ -569,6 +569,7 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 	for _, pod := range podList.Items {
 		if targetPod.Name == pod.Name {
 			// 自身は除外
+			// 自身は必ず許可される
 			continue
 		}
 		namespace := namespaceMap[pod.Namespace]
