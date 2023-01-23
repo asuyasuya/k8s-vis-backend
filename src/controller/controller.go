@@ -44,35 +44,39 @@ type NodeListViewModel struct {
 
 func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		now := time.Now()
+		now := time.Now() // 計測用
 		nodes, err := c.kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": err.Error(),
 			})
+			return
+		}
+		pods, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		nodeNamePodListMap := make(map[string][]PodViewModel, len(nodes.Items))
+		for _, pod := range pods.Items {
+			nodeName := pod.Spec.NodeName
+			if _, ok := nodeNamePodListMap[nodeName]; !ok {
+				nodeNamePodListMap[nodeName] = make([]PodViewModel, len(pods.Items)/len(nodes.Items))
+			}
+			nodeNamePodListMap[nodeName] = append(nodeNamePodListMap[nodeName], PodViewModel{
+				Name: pod.Name,
+			})
 		}
 
 		nodeList := make([]NodeViewModel, 0, len(nodes.Items))
 		for _, node := range nodes.Items {
-			pods, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
-				FieldSelector: "spec.nodeName=" + node.Name,
-			})
-			if err != nil {
-				ctx.JSON(http.StatusInternalServerError, gin.H{
-					"error": err.Error(),
-				})
-			}
-
-			podList := make([]PodViewModel, 0, len(pods.Items))
-			for _, pod := range pods.Items {
-				podList = append(podList, PodViewModel{
-					Name: pod.Name,
-				})
-			}
 			nodeList = append(nodeList, NodeViewModel{
 				Name:     node.Name,
-				TotalPod: len(podList),
-				PodList:  podList,
+				TotalPod: len(nodeNamePodListMap[node.Name]),
+				PodList:  nodeNamePodListMap[node.Name],
 			})
 		}
 
@@ -82,7 +86,7 @@ func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, res)
-		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
+		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds()) // 計測用
 	}
 }
 
