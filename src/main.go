@@ -11,6 +11,6 @@ func main() {
 		panic(err.Error())
 	}
 	ctrl := controller.NewController(clientset)
-	router := controller.GetRouter(ctrl)
+	router := config.GetRouter(ctrl)
 	router.Run(":8080")
 }

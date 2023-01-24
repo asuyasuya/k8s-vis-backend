@@ -1,12 +1,13 @@
-package controller
+package config
 
 import (
+	"github.com/asuyasuya/k8s-vis-backend/src/controller"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"time"
 )
 
-func GetRouter(c *Ctrl) *gin.Engine {
+func GetRouter(c *controller.Ctrl) *gin.Engine {
 	router := gin.Default()
 	router.Use(newCorsConfig())
 	api := router.Group("api")
