@@ -42,7 +42,7 @@ type AccessPod struct {
 
 type PodPolicy struct {
 	CanAccess bool       `json:"can_access"`
-	Ports     []PortInfo `json:"ports,omitempty"`
+	Ports     []PortInfo `json:"ports"`
 }
 
 type PortRealInfo struct {
@@ -52,9 +52,9 @@ type PortRealInfo struct {
 }
 
 type PortInfo struct {
-	Protocol *interface{} `json:"protocol,omitempty"`
-	Port     *interface{} `json:"port,omitempty"`
-	EndPort  *interface{} `json:"end_port,omitempty"`
+	Protocol *interface{} `json:"protocol"`
+	Port     *interface{} `json:"port"`
+	EndPort  *interface{} `json:"end_port"`
 }
 
 func Cast2PortRealInfo(port netv1.NetworkPolicyPort) PortRealInfo {
