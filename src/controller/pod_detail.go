@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/asuyasuya/k8s-vis-backend/src/model"
-	"github.com/aws/smithy-go/ptr"
 	"github.com/gin-gonic/gin"
 	v1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"log"
 	"net"
 	"net/http"
@@ -21,24 +19,11 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		now := time.Now()
 		podName := ctx.Param("name")
+
+		// Pod一覧を取得
 		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 
-		targetPod, err := findPodByName(podList, podName)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		if len(podList.Items) == 0 {
-			ctx.JSON(http.StatusInternalServerError, gin.H{
-				"error": "There is not a pod named" + podName,
-			})
-			return
-		}
-
-		// ネットワークポリシー一覧を取得する
+		// Network Policy一覧を取得する
 		policyList, err := c.kubeClient.NetworkingV1().NetworkPolicies("").List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
@@ -55,85 +40,31 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 			})
 			return
 		}
-		namespaceMap := getNamespaceMap(namespaceList.Items)
 
-		targetIngressMap, targetEgressMap, podMap, policyNames := getTargetPodPolicyMap(ctx, targetPod, podList, namespaceMap, policyList)
-
-		var res model.PodDetailViewModel
-
-		// resの作成
-		accessPods := make([]model.AccessPod, len(podList.Items))
-		for i, pod := range podList.Items {
-			accessPods[i].Name = pod.Name
-			accessPods[i].Namespace = pod.Namespace
-			accessPods[i].Ip = pod.Status.PodIP
-			accessPods[i].Labels = model.LabelViewModel(pod)
-			if _, ok := podMap[pod.Name]; ok {
-				accessPodPolicy := getAccessPodPolicy(ctx, targetPod, pod, namespaceMap[targetPod.Namespace], policyList) // ingressMap[v.Name]とsrcEgressMap[targetPod]の交わりが行けるポート番号
-
-				targetIngressPolicy, ok1 := targetIngressMap[pod.Name]
-				if ok && accessPodPolicy.egress != nil {
-					if accessPorts, hasPort := getAccessPorts(targetIngressPolicy.ports, accessPodPolicy.egress.ports); hasPort {
-						var resPorts []model.PortInfo
-						for _, port := range accessPorts {
-							resPorts = append(resPorts, model.PortInfo{
-								Protocol: model.CastProtocol(port.Protocol),
-								Port:     int(port.Port.IntVal),
-								EndPort:  int(ptr.ToInt32(port.EndPort)),
-							})
-						}
-						accessPods[i].Ingress = model.PodPolicy{
-							CanAccess: true,
-							Ports:     resPorts,
-						}
-					} else {
-						accessPods[i].Ingress = model.PodPolicy{
-							CanAccess: false,
-						}
-					}
-				} else {
-					accessPods[i].Ingress = model.PodPolicy{
-						CanAccess: false,
-					}
-				}
-
-				// egressMap[v.Name]とdestIngressMap[targetPod]の交わりがおっけ
-				targetEgressPolicy, ok1 := targetEgressMap[pod.Name]
-				if ok1 && accessPodPolicy.ingress != nil {
-					if accessPorts, hasPort := getAccessPorts(targetEgressPolicy.ports, accessPodPolicy.ingress.ports); hasPort {
-						var resPorts []model.PortInfo
-						for _, port := range accessPorts {
-							resPorts = append(resPorts, model.PortInfo{
-								Protocol: model.CastProtocol(port.Protocol),
-								Port:     int(port.Port.IntVal),
-								EndPort:  int(ptr.ToInt32(port.EndPort)),
-							})
-						}
-
-						accessPods[i].Egress = model.PodPolicy{
-							CanAccess: true,
-							Ports:     resPorts,
-						}
-					} else {
-						accessPods[i].Egress = model.PodPolicy{
-							CanAccess: false,
-						}
-					}
-				} else {
-					accessPods[i].Egress = model.PodPolicy{
-						CanAccess: false,
-					}
-				}
-			} else {
-				accessPods[i].Ingress = model.PodPolicy{
-					CanAccess: false,
-				}
-				accessPods[i].Egress = model.PodPolicy{
-					CanAccess: false,
-				}
-			}
+		targetPod, err := findPodByName(podList, podName)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
 		}
 
+		if len(podList.Items) == 0 {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": "There is not a pod named" + podName,
+			})
+			return
+		}
+
+		accessPods, policyNames, err := getAccessPods(podList, policyList, namespaceList, targetPod)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": "invalid ip block",
+			})
+			return
+		}
+
+		var res model.PodDetailViewModel
 		res.Name = targetPod.Name
 		res.Namespace = targetPod.Namespace
 		res.Ip = targetPod.Status.PodIP
@@ -144,6 +75,287 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		ctx.JSON(http.StatusOK, res)
 		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
 	}
+}
+func getAccessPods(podList *v1.PodList, policyList *netv1.NetworkPolicyList, namespaceList *v1.NamespaceList, targetPod v1.Pod) ([]model.AccessPod, []string, error) {
+	namespaceMap := getNamespaceMap(namespaceList.Items)
+
+	// targetPodに適用されたNetwork Policyの一覧を取得
+	filteredPolicyList := filterPolicyListByPod(policyList.Items, targetPod)
+	// ingressが書かれたpolicyとegressが書かれたpolicyに分ける(どちらの記述もある場合はどちらの配列にも)
+	ingressPolicyList, egressPolicyList := classifyIngressOrEgress(filteredPolicyList)
+	// policyの名前一覧をを返却用に作る
+	policyNames := make([]string, 0, len(filteredPolicyList))
+	for _, v := range filteredPolicyList {
+		policyNames = append(policyNames, v.Name)
+	}
+
+	accessPods := make([]model.AccessPod, len(podList.Items))
+	for i, pod := range podList.Items {
+		if pod.Name == targetPod.Name {
+			// 自身は常にいかなるポートでも通信可
+			accessPods[i].Name = pod.Name
+			accessPods[i].Ip = pod.Status.PodIP
+			accessPods[i].Labels = model.LabelViewModel(pod)
+			accessPods[i].Namespace = pod.Namespace
+			accessPods[i].Ingress = model.PodPolicy{
+				CanAccess: true,
+				Ports:     nil,
+			}
+			accessPods[i].Egress = model.PodPolicy{
+				CanAccess: true,
+				Ports:     nil,
+			}
+			continue
+		}
+
+		PodNamespace := namespaceMap[pod.Namespace]
+		// PodはtargetPodのingressを満たすか、満たすのであればどんなportか取得
+		targetIngressPorts, targetIngressOk, err := getIngressPorts(pod, ingressPolicyList, PodNamespace)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// PodはtargetPodのegressを満たすか、満たすのであればどんなportか取得
+		targetEgressPorts, targetEgressOk, err := getEgressPorts(pod, egressPolicyList, PodNamespace)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// Podに適用されたNetwork Policyの一覧をフィルタリング
+		filteredPodPolicyList := filterPolicyListByPod(policyList.Items, pod)
+
+		// ingressが書かれたpolicyとegressが書かれたpolicyに分ける(どちらの記述もある場合はどちらの配列にも)
+		podIngressPolicyList, podEgressPolicyList := classifyIngressOrEgress(filteredPodPolicyList)
+		targetNamespace := namespaceMap[targetPod.Namespace]
+
+		// PodからtargetPodへのEgressが可能かチェック + 一致しているポートのチェック
+		ingressPodPolicy, err := getIngressPodPolicy(targetIngressOk, targetPod, podEgressPolicyList, targetNamespace, targetIngressPorts)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// targetPodからPodへのIngressが可能かチェック + 一致しているポートのチェック
+		egressPodPolicy, err := getEgressPodPolicy(targetEgressOk, targetPod, podIngressPolicyList, targetNamespace, targetEgressPorts)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		accessPods[i].Name = pod.Name
+		accessPods[i].Ip = pod.Status.PodIP
+		accessPods[i].Labels = model.LabelViewModel(pod)
+		accessPods[i].Namespace = pod.Namespace
+		accessPods[i].Ingress = ingressPodPolicy
+		accessPods[i].Egress = egressPodPolicy
+	}
+
+	return accessPods, policyNames, nil
+}
+
+func getIngressPodPolicy(targetIngressOk bool, targetPod v1.Pod, podEgressPolicyList []netv1.NetworkPolicy, targetNamespace v1.Namespace, targetIngressPorts []netv1.NetworkPolicyPort) (model.PodPolicy, error) {
+	var res model.PodPolicy
+	if !targetIngressOk {
+		return res, nil
+	}
+
+	// targetPodがPodからのingressが可能な時に今度は逆にPodからtargetPodへのEgressが可能かチェックする
+	podEgressPorts, podEgressOk, err := getEgressPorts(targetPod, podEgressPolicyList, targetNamespace)
+	if err != nil {
+		return model.PodPolicy{}, err
+	}
+
+	if !podEgressOk {
+		return res, nil
+	}
+
+	// 重複しているポート情報を削除
+	arrangedTargetIngressPorts := deleteDuplicationPolicyPort(targetIngressPorts)
+	arrangedPodEgressPorts := deleteDuplicationPolicyPort(podEgressPorts)
+	// お互いの許可するポート情報で一致する部分を抽出
+	accessPorts, hasPort := getAccessPorts(arrangedTargetIngressPorts, arrangedPodEgressPorts)
+
+	if !hasPort {
+		return res, nil
+	}
+
+	ports := make([]model.PortInfo, 0, len(accessPorts))
+	for _, p := range accessPorts {
+		ports = append(ports, model.Cast2PortInfo(p))
+	}
+	res.CanAccess = true
+	res.Ports = ports
+
+	return res, nil
+}
+
+func getEgressPodPolicy(targetEgressOk bool, targetPod v1.Pod, podIngressPolicyList []netv1.NetworkPolicy, targetNamespace v1.Namespace, targetEgressPorts []netv1.NetworkPolicyPort) (model.PodPolicy, error) {
+	var res model.PodPolicy
+	if !targetEgressOk {
+		return res, nil
+	}
+
+	// targetPodがPodへのEgressが可能な時に今度は逆にPodがtargetPodからのIngressが可能かチェックする
+	podIngressPorts, podIngressOk, err := getIngressPorts(targetPod, podIngressPolicyList, targetNamespace)
+	if err != nil {
+		return model.PodPolicy{}, err
+	}
+
+	if !podIngressOk {
+		return res, nil
+	}
+
+	// 重複しているポート情報を削除
+	arrangedTargetEgressPorts := deleteDuplicationPolicyPort(targetEgressPorts)
+	arrangedPodIngressPorts := deleteDuplicationPolicyPort(podIngressPorts)
+	// お互いの許可するポート情報で一致する部分を抽出
+	accessPorts, hasPort := getAccessPorts(arrangedTargetEgressPorts, arrangedPodIngressPorts)
+
+	if !hasPort {
+		return res, nil
+	}
+
+	ports := make([]model.PortInfo, 0, len(accessPorts))
+	for _, p := range accessPorts {
+		ports = append(ports, model.Cast2PortInfo(p))
+	}
+	res.CanAccess = true
+	res.Ports = ports
+
+	return res, nil
+}
+
+func classifyIngressOrEgress(policyList []netv1.NetworkPolicy) ([]netv1.NetworkPolicy, []netv1.NetworkPolicy) {
+	ingressPolicyList := make([]netv1.NetworkPolicy, 0, len(policyList))
+	egressPolicyList := make([]netv1.NetworkPolicy, 0, len(policyList))
+	for _, p := range policyList {
+		if hasIngress(p.Spec.PolicyTypes) {
+			ingressPolicyList = append(ingressPolicyList, p)
+		}
+
+		if hasIngress(p.Spec.PolicyTypes) {
+			egressPolicyList = append(egressPolicyList, p)
+		}
+	}
+	return ingressPolicyList, egressPolicyList
+}
+
+func getIngressPorts(srcPod v1.Pod, targetPodIngressPolicyList []netv1.NetworkPolicy, srcPodNamespace v1.Namespace) ([]netv1.NetworkPolicyPort, bool, error) {
+	if len(targetPodIngressPolicyList) == 0 {
+		// ingressに関してはpolicyによって制限されることがないのでtargetPodは全podの全portで通信可能
+		return []netv1.NetworkPolicyPort{}, true, nil
+	}
+
+	// 何かしらpolicyが適用されるということ
+	ingressPorts := make([]netv1.NetworkPolicyPort, 0, 10)
+	ok := false
+	for _, policy := range targetPodIngressPolicyList {
+		for _, rule := range policy.Spec.Ingress {
+			if len(rule.From) == 0 {
+				// ingress: {} パターン．全namespaceの全podを受け入れる
+				ingressPorts = append(ingressPorts, rule.Ports...)
+				ok = true
+				continue
+			}
+
+			// ここからor条件
+			for _, peer := range rule.From {
+				// ここからand条件
+
+				// NamespaceSelectorのチェック
+				if peer.NamespaceSelector == nil {
+					// Network Policyが属するNamespaceに属するPodが対象になる
+					if policy.Namespace != srcPod.Namespace {
+						continue
+					}
+				} else {
+					// 通信を受け入れるnamespaceが指定されている場合
+					// srcPodが属しているnamespaceがpeer.NamespaceSelectorにマッチしているかチェックする
+					if !isIncludedInLabelSelector(srcPodNamespace.Labels, peer.NamespaceSelector) {
+						continue
+					}
+				}
+
+				// PodSelectorのチェック
+				if !isIncludedInLabelSelector(srcPod.Labels, peer.PodSelector) {
+					continue
+				}
+
+				// IPBlockのチェック
+				isIncluded, err := isIncludedInIpBlock(peer.IPBlock, srcPod.Status.PodIP)
+				if err != nil {
+					return nil, false, err
+				}
+				if !isIncluded {
+					continue
+				}
+
+				// ここまできたらsrcPodはingressに含まれる
+				ingressPorts = append(ingressPorts, rule.Ports...)
+				ok = true
+			}
+		}
+	}
+
+	return ingressPorts, ok, nil
+}
+
+func getEgressPorts(destPod v1.Pod, targetPodEgressPolicyList []netv1.NetworkPolicy, destPodNamespace v1.Namespace) ([]netv1.NetworkPolicyPort, bool, error) {
+	if len(targetPodEgressPolicyList) == 0 {
+		// egressに関してはpolicyによって制限されることがないのでtargetPodは全podの全portで通信可能
+		return []netv1.NetworkPolicyPort{}, true, nil
+	}
+
+	// 何かしらpolicyが適用されるということ
+	egressPorts := make([]netv1.NetworkPolicyPort, 0, 10)
+	ok := false
+	for _, policy := range targetPodEgressPolicyList {
+		for _, rule := range policy.Spec.Egress {
+			if len(rule.To) == 0 {
+				// egress: {} パターン．全namespaceの全podへの通信可
+				egressPorts = append(egressPorts, rule.Ports...)
+				ok = true
+				continue
+			}
+
+			// ここからor条件
+			for _, peer := range rule.To {
+				// ここからand条件
+
+				// NamespaceSelectorのチェック
+				if peer.NamespaceSelector == nil {
+					// Network Policyが属するNamespaceに属するPodが対象になる
+					if policy.Namespace != destPod.Namespace {
+						continue
+					}
+				} else {
+					// 通信を受け入れるnamespaceが指定されている場合
+					// srcPodが属しているnamespaceがpeer.NamespaceSelectorにマッチしているかチェックする
+					if !isIncludedInLabelSelector(destPodNamespace.Labels, peer.NamespaceSelector) {
+						continue
+					}
+				}
+
+				// PodSelectorのチェック
+				if !isIncludedInLabelSelector(destPod.Labels, peer.PodSelector) {
+					continue
+				}
+
+				// IPBlockのチェック
+				isIncluded, err := isIncludedInIpBlock(peer.IPBlock, destPod.Status.PodIP)
+				if err != nil {
+					return nil, false, err
+				}
+				if !isIncluded {
+					continue
+				}
+
+				// ここまできたらdestPodはegressに含まれる
+				egressPorts = append(egressPorts, rule.Ports...)
+				ok = true
+			}
+		}
+	}
+
+	return egressPorts, ok, nil
 }
 
 func findPodByName(list *v1.PodList, name string) (v1.Pod, error) {
@@ -281,88 +493,88 @@ func getNamespaceMap(namespaceListItems []v1.Namespace) map[string]v1.Namespace 
 	return m
 }
 
-func checkProtocol(targetProtocol *v1.Protocol, otherProtocol *v1.Protocol) (*v1.Protocol, bool) {
-	if targetProtocol == nil && otherProtocol == nil {
-		return nil, true
+func checkProtocol(targetProtocol string, otherProtocol string) (string, bool) {
+	if targetProtocol == "any" && otherProtocol == "any" {
+		return "any", true
 	}
 
-	if targetProtocol == nil && otherProtocol != nil {
+	if targetProtocol == "any" && otherProtocol != "any" {
 		return otherProtocol, true
 	}
 
-	if targetProtocol != nil && otherProtocol == nil {
+	if targetProtocol != "any" && otherProtocol == "any" {
 		return targetProtocol, true
 	}
 
-	if *targetProtocol == *otherProtocol {
+	if targetProtocol == otherProtocol {
 		return targetProtocol, true
 	}
 
-	return nil, false
+	return "any", false
 }
 
-func checkPort(targetPort netv1.NetworkPolicyPort, otherPort netv1.NetworkPolicyPort) (*intstr.IntOrString, *int32, bool) {
-	if targetPort.Port == nil && otherPort.Port == nil {
-		return nil, nil, true
+func checkPort(targetPort model.PortRealInfo, otherPort model.PortRealInfo) (int, int, bool) {
+	if targetPort.Port == 0 && otherPort.Port == 0 {
+		return 0, 0, true
 	}
 
-	if targetPort.Port == nil && otherPort.Port != nil {
+	if targetPort.Port == 0 && otherPort.Port != 0 {
 		return otherPort.Port, otherPort.EndPort, true
 	}
 
-	if targetPort.Port != nil && otherPort.Port == nil {
+	if targetPort.Port != 0 && otherPort.Port == 0 {
 		return targetPort.Port, targetPort.EndPort, true
 	}
 
 	// EndPort絡み
-	if targetPort.EndPort == nil && otherPort.EndPort == nil {
-		if targetPort.Port.IntVal == otherPort.Port.IntVal {
+	if targetPort.EndPort == 0 && otherPort.EndPort == 0 {
+		if targetPort.Port == otherPort.Port {
 			return targetPort.Port, targetPort.EndPort, true
 		}
-		return nil, nil, false
+		return 0, 0, false
 	}
 
-	if targetPort.EndPort == nil && otherPort.EndPort != nil {
-		if otherPort.Port.IntVal <= targetPort.Port.IntVal && targetPort.Port.IntVal <= *otherPort.EndPort {
-			return targetPort.Port, nil, true
+	if targetPort.EndPort == 0 && otherPort.EndPort != 0 {
+		if otherPort.Port <= targetPort.Port && targetPort.Port <= otherPort.EndPort {
+			return targetPort.Port, 0, true
 		}
-		return nil, nil, false
+		return 0, 0, false
 	}
 
-	if targetPort.EndPort != nil && otherPort.EndPort == nil {
-		if targetPort.Port.IntVal <= otherPort.Port.IntVal && otherPort.Port.IntVal <= *targetPort.EndPort {
-			return otherPort.Port, nil, true
+	if targetPort.EndPort != 0 && otherPort.EndPort == 0 {
+		if targetPort.Port <= otherPort.Port && otherPort.Port <= targetPort.EndPort {
+			return otherPort.Port, 0, true
 		}
-		return nil, nil, false
+		return 0, 0, false
 	}
 
 	// どっちもendあり
-	if otherPort.Port.IntVal < targetPort.Port.IntVal {
-		if targetPort.Port.IntVal <= *otherPort.EndPort && *otherPort.EndPort <= *targetPort.EndPort {
+	if otherPort.Port < targetPort.Port {
+		if targetPort.Port <= otherPort.EndPort && otherPort.EndPort <= targetPort.EndPort {
 			return targetPort.Port, otherPort.EndPort, true
 		}
 
-		if *targetPort.EndPort <= *otherPort.EndPort {
+		if targetPort.EndPort <= otherPort.EndPort {
 			return targetPort.Port, targetPort.EndPort, true
 		}
 
-		return nil, nil, false
+		return 0, 0, false
 	} else {
-		if *otherPort.EndPort <= *targetPort.EndPort {
+		if otherPort.EndPort <= targetPort.EndPort {
 			return otherPort.Port, otherPort.EndPort, true
 		}
 
-		if *targetPort.EndPort <= *otherPort.EndPort {
+		if targetPort.EndPort <= otherPort.EndPort {
 			return otherPort.Port, targetPort.EndPort, true
 		}
 
-		return nil, nil, false
+		return 0, 0, false
 	}
 }
 
-func getAccessPorts(targetPorts []netv1.NetworkPolicyPort, otherPorts []netv1.NetworkPolicyPort) ([]netv1.NetworkPolicyPort, bool) {
+func getAccessPorts(targetPorts []model.PortRealInfo, otherPorts []model.PortRealInfo) ([]model.PortRealInfo, bool) {
 	if len(targetPorts) == 0 && len(otherPorts) == 0 {
-		return nil, true
+		return []model.PortRealInfo{}, true
 	}
 
 	if len(targetPorts) == 0 && len(otherPorts) != 0 {
@@ -373,7 +585,7 @@ func getAccessPorts(targetPorts []netv1.NetworkPolicyPort, otherPorts []netv1.Ne
 		return targetPorts, true
 	}
 
-	var res []netv1.NetworkPolicyPort
+	res := make([]model.PortRealInfo, 0, len(targetPorts)*len(otherPorts))
 	for _, targetPort := range targetPorts {
 		for _, otherPort := range otherPorts {
 			// protocolのチェック
@@ -388,7 +600,7 @@ func getAccessPorts(targetPorts []netv1.NetworkPolicyPort, otherPorts []netv1.Ne
 				continue
 			}
 
-			res = append(res, netv1.NetworkPolicyPort{
+			res = append(res, model.PortRealInfo{
 				Protocol: protocol,
 				Port:     port,
 				EndPort:  endPort,
@@ -397,6 +609,50 @@ func getAccessPorts(targetPorts []netv1.NetworkPolicyPort, otherPorts []netv1.Ne
 	}
 
 	return res, len(res) != 0
+}
+
+// 重複しているPolicyPortがあれば削除する
+func deleteDuplicationPolicyPort(l []netv1.NetworkPolicyPort) []model.PortRealInfo {
+	res := make([]model.PortRealInfo, 0, len(l))
+
+	if len(l) == 0 {
+		return res
+	}
+
+	// nullableは扱いにくいので一旦stringかintに直す.
+	m1 := make(map[string]map[int]map[int]model.PortRealInfo)
+	for _, pp := range l {
+		portInfo := model.Cast2PortRealInfo(pp)
+		if _, ok := m1[portInfo.Protocol]; !ok {
+			m3 := make(map[int]model.PortRealInfo)
+			m2 := make(map[int]map[int]model.PortRealInfo)
+			m3[portInfo.EndPort] = portInfo
+			m2[portInfo.Port] = m3
+			m1[portInfo.Protocol] = m2
+		} else {
+			// protocol自体は存在している
+			if _, ok2 := m1[portInfo.Protocol][portInfo.Port]; !ok2 {
+				m3 := make(map[int]model.PortRealInfo)
+				m3[portInfo.EndPort] = portInfo
+				m1[portInfo.Protocol][portInfo.Port] = m3
+			} else {
+				// protocol, port自体は存在している
+				if _, ok3 := m1[portInfo.Protocol][portInfo.Port][portInfo.EndPort]; !ok3 {
+					m1[portInfo.Protocol][portInfo.Port][portInfo.EndPort] = portInfo
+				}
+			}
+		}
+	}
+
+	for _, m2 := range m1 {
+		for _, m3 := range m2 {
+			for _, portInfo := range m3 {
+				res = append(res, portInfo)
+			}
+		}
+	}
+
+	return res
 }
 
 func initPodNamePolicyInfoMap(m map[string]*policyInfo, pod v1.Pod) {
@@ -448,7 +704,7 @@ func getTargetPodPolicyMap(ctx *gin.Context, targetPod v1.Pod, podList *v1.PodLi
 				// podがsrcPodとなりうるかチェックする
 				for _, rule := range policy.Spec.Ingress {
 					if len(rule.From) == 0 {
-						// ingress{} パターン 全namespaceのいかなる全podを受け入れる
+						// ingress{} パターン 全namespaceの全podを受け入れる
 						initPodNamePolicyInfoMap(ingressMap, pod)
 						ingressMap[pod.Name].ports = append(ingressMap[pod.Name].ports, rule.Ports...)
 						podMap[pod.Name] = pod

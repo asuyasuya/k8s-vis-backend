@@ -1,6 +1,10 @@
 package model
 
-import v1 "k8s.io/api/core/v1"
+import (
+	v1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
 
 type PodDetailViewModel struct {
 	Name        string      `json:"name"`
@@ -38,13 +42,27 @@ type AccessPod struct {
 
 type PodPolicy struct {
 	CanAccess bool       `json:"can_access"`
-	Ports     []PortInfo `json:"ports"`
+	Ports     []PortInfo `json:"ports,omitempty"`
+}
+
+type PortRealInfo struct {
+	Protocol string
+	Port     int
+	EndPort  int
 }
 
 type PortInfo struct {
-	Protocol string `json:"protocol"`
-	Port     int    `json:"port"`
-	EndPort  int    `json:"end_port"`
+	Protocol *interface{} `json:"protocol,omitempty"`
+	Port     *interface{} `json:"port,omitempty"`
+	EndPort  *interface{} `json:"end_port,omitempty"`
+}
+
+func Cast2PortRealInfo(port netv1.NetworkPolicyPort) PortRealInfo {
+	return PortRealInfo{
+		Protocol: CastProtocol(port.Protocol),
+		Port:     CastPort(port.Port),
+		EndPort:  CastEndPort(port.EndPort),
+	}
 }
 
 func CastProtocol(protocol *v1.Protocol) string {
@@ -60,6 +78,50 @@ func CastProtocol(protocol *v1.Protocol) string {
 	case v1.ProtocolSCTP:
 		return "SCTP"
 	default:
-		return "unknown"
+		return "any"
 	}
+}
+
+func CastPort(port *intstr.IntOrString) int {
+	if port == nil {
+		return 0
+	}
+
+	return int(port.IntVal)
+}
+
+func CastEndPort(endPort *int32) int {
+	if endPort == nil {
+		return 0
+	}
+
+	return int(*endPort)
+}
+
+func Cast2PortInfo(info PortRealInfo) PortInfo {
+	var res PortInfo
+
+	// protocol
+	switch info.Protocol {
+	case "TCP", "UDP", "SCTP":
+		var protocol interface{}
+		protocol = info.Protocol
+		res.Protocol = &protocol
+	}
+
+	// port
+	if info.Port != 0 {
+		var port interface{}
+		port = info.Port
+		res.Port = &port
+	}
+
+	// port
+	if info.EndPort != 0 {
+		var endPort interface{}
+		endPort = info.EndPort
+		res.EndPort = &endPort
+	}
+
+	return res
 }
