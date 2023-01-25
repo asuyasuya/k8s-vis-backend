@@ -125,3 +125,15 @@ func Cast2PortInfo(info PortRealInfo) PortInfo {
 
 	return res
 }
+
+func Cast2PortInfoList(realInfoList []PortRealInfo) []PortInfo {
+	if len(realInfoList) == 0 {
+		return nil
+	}
+	res := make([]PortInfo, 0, len(realInfoList))
+	for _, p := range realInfoList {
+		res = append(res, Cast2PortInfo(p))
+	}
+
+	return res
+}
