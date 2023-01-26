@@ -12,6 +12,7 @@ import (
 
 func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		fmt.Println("ノード一覧")
 		now := time.Now() // 計測用
 		nodes, err := c.kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
@@ -27,12 +28,13 @@ func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 			})
 			return
 		}
+		fmt.Printf("k8sAPIレイテンシー: %v\n", time.Since(now)) // 計測用
 
 		nodeNamePodListMap := make(map[string][]model.PodViewModel, len(nodes.Items))
 		for _, pod := range pods.Items {
 			nodeName := pod.Spec.NodeName
 			if _, ok := nodeNamePodListMap[nodeName]; !ok {
-				nodeNamePodListMap[nodeName] = make([]model.PodViewModel, len(pods.Items)/len(nodes.Items))
+				nodeNamePodListMap[nodeName] = make([]model.PodViewModel, 0, len(pods.Items)/len(nodes.Items))
 			}
 			nodeNamePodListMap[nodeName] = append(nodeNamePodListMap[nodeName], model.PodViewModel{
 				Name: pod.Name,
@@ -54,6 +56,6 @@ func (c *Ctrl) GetNodeList() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, res)
-		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds()) // 計測用
+		fmt.Printf("可視化システム処理時間: %v\n", time.Since(now)) // 計測用
 	}
 }

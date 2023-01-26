@@ -17,9 +17,11 @@ import (
 
 func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		fmt.Println("Pod詳細")
 		now := time.Now()
 		podName := ctx.Param("name")
 
+		now2 := time.Now()
 		// Pod一覧を取得
 		podList, err := c.kubeClient.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 
@@ -40,6 +42,7 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 			})
 			return
 		}
+		fmt.Printf("k8s API レイテンシー: %v\n", time.Since(now2)) // 計測用
 
 		targetPod, err := findPodByName(podList, podName)
 		if err != nil {
@@ -73,7 +76,7 @@ func (c *Ctrl) GetPodDetail() gin.HandlerFunc {
 		res.AccessPods = accessPods
 
 		ctx.JSON(http.StatusOK, res)
-		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
+		fmt.Printf("可視化システム処理時間: %v\n", time.Since(now)) // 計測用
 	}
 }
 func getAccessPods(podList *v1.PodList, policyList *netv1.NetworkPolicyList, namespaceList *v1.NamespaceList, targetPod v1.Pod) ([]model.AccessPod, []string, error) {

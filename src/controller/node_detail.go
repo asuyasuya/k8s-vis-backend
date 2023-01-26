@@ -12,6 +12,7 @@ import (
 
 func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		fmt.Println("ノード詳細")
 		now := time.Now()
 		nodeName := ctx.Param("name")
 		node, err := c.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
@@ -21,6 +22,7 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 			})
 			return
 		}
+		fmt.Printf("k8sAPIレイテンシー: %v\n", time.Since(now)) // 計測用
 
 		res := model.NodeDetailViewModel{
 			Name:    node.Name,
@@ -29,6 +31,6 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 		}
 
 		ctx.JSON(200, res)
-		fmt.Printf("経過: %vms\n", time.Since(now).Milliseconds())
+		fmt.Printf("可視化システム処理時間: %v\n", time.Since(now)) // 計測用
 	}
 }
