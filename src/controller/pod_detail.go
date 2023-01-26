@@ -177,12 +177,8 @@ func getIngressPodPolicy(targetIngressOk bool, targetPod v1.Pod, podEgressPolicy
 		return res, nil
 	}
 
-	ports := make([]model.PortInfo, 0, len(accessPorts))
-	for _, p := range accessPorts {
-		ports = append(ports, model.Cast2PortInfo(p))
-	}
 	res.CanAccess = true
-	res.Ports = ports
+	res.Ports = model.Cast2PortInfoList(accessPorts)
 
 	return res, nil
 }
@@ -213,12 +209,8 @@ func getEgressPodPolicy(targetEgressOk bool, targetPod v1.Pod, podIngressPolicyL
 		return res, nil
 	}
 
-	ports := make([]model.PortInfo, 0, len(accessPorts))
-	for _, p := range accessPorts {
-		ports = append(ports, model.Cast2PortInfo(p))
-	}
 	res.CanAccess = true
-	res.Ports = ports
+	res.Ports = model.Cast2PortInfoList(accessPorts)
 
 	return res, nil
 }
