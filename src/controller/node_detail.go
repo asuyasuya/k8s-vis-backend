@@ -22,7 +22,7 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 			})
 			return
 		}
-		fmt.Printf("k8sAPIレイテンシー: %v\n", time.Since(now)) // 計測用
+		fmt.Printf("kube-api応答時間: %v\n", time.Since(now)) // 計測用
 
 		res := model.NodeDetailViewModel{
 			Name:    node.Name,
@@ -31,6 +31,6 @@ func (c *Ctrl) GetNodeDetail() gin.HandlerFunc {
 		}
 
 		ctx.JSON(200, res)
-		fmt.Printf("可視化システム処理時間: %v\n", time.Since(now)) // 計測用
+		fmt.Printf("全体処理時間: %v\n", time.Since(now)) // 計測用
 	}
 }
