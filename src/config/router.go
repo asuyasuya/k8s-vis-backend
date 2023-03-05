@@ -11,15 +11,9 @@ func GetRouter(c *controller.Ctrl) *gin.Engine {
 	router := gin.Default()
 	router.Use(newCorsConfig())
 	api := router.Group("api")
-	api.GET("/", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "Hello World asu",
-		})
-	})
 	api.GET("nodes", c.GetNodeList())
 	api.GET("nodes/:name", c.GetNodeDetail())
 	api.GET("pods/:name", c.GetPodDetail())
-	api.GET("test", c.GetTest())
 	return router
 }
 

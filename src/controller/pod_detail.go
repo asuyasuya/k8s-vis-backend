@@ -226,7 +226,7 @@ func classifyIngressOrEgress(policyList []netv1.NetworkPolicy) ([]netv1.NetworkP
 			ingressPolicyList = append(ingressPolicyList, p)
 		}
 
-		if hasIngress(p.Spec.PolicyTypes) {
+		if hasEgress(p.Spec.PolicyTypes) {
 			egressPolicyList = append(egressPolicyList, p)
 		}
 	}
@@ -384,7 +384,6 @@ func hasEgress(types []netv1.PolicyType) bool {
 	return false
 }
 
-// 別の処理にする
 func isIncludedInLabelSelector(labels map[string]string, podSelector *metav1.LabelSelector) bool {
 	if podSelector == nil {
 		return true
