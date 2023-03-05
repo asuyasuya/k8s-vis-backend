@@ -214,5 +214,24 @@ docker run --name api-prod-container -p 8080:8080 -d asuyasuya/api-prod
 
 4. ローカルPCとAPIサーバーとk8sクラスターが同一ネットワークにある状態で，ローカルPCのブラウザで`10.20.22.192:8080/api/nodes`にアクセス(IPアドレスは自身の環境のAPIサーバーのIPアドレスを使用してください)
 
-## 実験環境の構築(k8sクラスター)
-卒論における実験環境の構築手順を説明します．(未)
+## 実験環境の構築(k8sクラスターの設定)
+卒研における実験環境の構築手順を説明します．
+シナリオとして下の3つがあります．
+1. Nodeの数を変化させる
+2. Podの数を変化させる
+3. Network Policyの数を変化させる
+
+teamsの`12_卒業生/2022年度卒業/B195312-懸川明日也/evaluation`配下にそれぞれのシナリオに対応する`node_change/`, `pod_change/`, `network_policy_change/`
+があります．それらの中のyamlファイルをマスターノードに適用させたり，削除させたりすることで実験環境を変更させることができます．
+
+```
+# 適用
+kubectl apply -f example.yaml
+
+# 削除
+kubectl delete -f example.yaml
+```
+
+Podの数とNetwork Policyの数に関しては全てyamlファイルで変化させることができますが，Nodeの数に関してはマスターノード上でコマンドを実行させる
+ことで変更させる必要があります．Nodeの追加は上で述べた`kubeadm join`で可能であり，削除に関しては[このサイト](https://www.server-world.info/query?os=Ubuntu_20.04&p=kubernetes&f=8)
+が参考になるかと思います．
