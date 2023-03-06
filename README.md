@@ -232,6 +232,5 @@ kubectl apply -f example.yaml
 kubectl delete -f example.yaml
 ```
 
-Podの数とNetwork Policyの数に関しては全てyamlファイルで変化させることができますが，Nodeの数に関してはマスターノード上でコマンドを実行させる
-ことで変更させる必要があります．Nodeの追加は上で述べた`kubeadm join`で可能であり，削除に関しては[このサイト](https://www.server-world.info/query?os=Ubuntu_20.04&p=kubernetes&f=8)
+Podの数とNetwork Policyの数に関しては全てyamlファイルで変化させることができますが，Nodeの数に関してはマスターノード上でのコマンド実行で変更させる必要があります．Nodeの追加は上で述べた`kubeadm join`で可能であり，削除に関しては[このサイト](https://www.server-world.info/query?os=Ubuntu_20.04&p=kubernetes&f=8)
 が参考になるかと思います．
