@@ -222,7 +222,7 @@ docker run --name api-prod-container -p 8080:8080 -d asuyasuya/api-prod
 3. Network Policyの数を変化させる
 
 teamsの`12_卒業生/2022年度卒業/B195312-懸川明日也/evaluation`配下にそれぞれのシナリオに対応する`node_change/`, `pod_change/`, `network_policy_change/`
-があります．それらの中のyamlファイルをマスターノードに適用させたり，削除させたりすることで実験環境を変更させることができます．各シナリオのパラメータごとにさらにフォルダを作成しているので，それぞれのパラメータごとに適用するyamlファイルを変えてください.network_policy_changeディレクトリの各フォルダにはpod作成用のyamlファイル(nginx~~~.yaml)とpolicy作成用ののyamlファイル(policy~~~~.yaml)があるので全て適用させてください．またnetwork_policy_changeのシナリオに限り， 詳細取得APIにおける対象Podを作成するためのnginx00.yamlの適用をしてください．
+があります．それらの中のyamlファイルをマスターノードに適用させたり，削除させたりすることで実験環境を変更させることができます．各シナリオのパラメータごとにさらにフォルダを作成しているので，それぞれのパラメータごとに適用するyamlファイルを変えてください.network_policy_changeディレクトリの各フォルダにはpod作成用のyamlファイル(nginx----.yaml)とpolicy作成用ののyamlファイル(policy----.yaml)があるので全て適用させてください．またnetwork_policy_changeのシナリオに限り， Pod詳細取得APIにおける対象Podを作成するためのnginx00.yamlの適用をしてください．
 
 ```
 # 適用
