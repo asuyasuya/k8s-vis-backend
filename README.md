@@ -234,3 +234,12 @@ kubectl delete -f example.yaml
 
 Podの数とNetwork Policyの数に関しては全てyamlファイルで変化させることができますが，Nodeの数に関してはマスターノード上でのコマンド実行で変更させる必要があります．Nodeの追加は上で述べた`kubeadm join`で可能であり，削除に関しては[このサイト](https://www.server-world.info/query?os=Ubuntu_20.04&p=kubernetes&f=8)
 が参考になるかと思います．
+
+
+### 計測時間について
+計測の処理はすでにコードに含まれているので，APIを実行すれば処理時間が計測されその結果がログに出ます．ログの出力はAPIサーバーで以下のコマンドをコンテナが起動した状態で実行すると確認することができます．
+```
+docker logs -f <起動しているコンテナ名>
+```
+
+詳しい計測タイミングは`src/controller/node_detail.go``src/controller/node_list.go``src/controller/pod_detail.go`を確認してもらえばわかると思います．time.Now()で計測を開始してtime.Since()まで経過時間を出力しています．
