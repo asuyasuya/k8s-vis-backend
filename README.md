@@ -242,4 +242,4 @@ Podの数とNetwork Policyの数に関しては全てyamlファイルで変化�
 docker logs -f <起動しているコンテナ名>
 ```
 
-詳しい計測タイミングは`src/controller/node_detail.go``src/controller/node_list.go``src/controller/pod_detail.go`を確認してもらえばわかると思います．time.Now()で計測を開始してtime.Since()まで経過時間を出力しています．
+詳しい計測タイミングは`src/controller/node_detail.go`, `src/controller/node_list.go`, `src/controller/pod_detail.go`を確認してもらえばわかると思います．time.Now()で計測を開始してtime.Since()まで経過時間を出力しています．
